@@ -113,8 +113,7 @@ class Auth0JSONWebTokenAuthentication(JSONWebTokenAuthentication, RemoteUserBack
         scopes = payload.get('scope', "")
         scopes = [scope.split(':') for scope in scopes.split(' ') if scope]
 
-        with transaction.atomic():
-            old_permissions = set(user.user_permissions.all())
+        old_permissions = set(Permission.objects.filter(user=user))
         new_permissions = set()
         for verb, subject in reversed(scopes):
             try:
@@ -125,13 +124,14 @@ class Auth0JSONWebTokenAuthentication(JSONWebTokenAuthentication, RemoteUserBack
             else:
                 new_permissions.add(permission)
 
-        for permission in old_permissions - new_permissions:
-            user.user_permissions.remove(permission)
-            logger.debug(f'granted {permission} to {user}')
-        for permission in new_permissions - old_permissions:
-            user.user_permissions.add(permission)
-            logger.debug(f'granted {permission} to {user}')
-            logger.debug(user.user_permissions.all())
+        for added in old_permissions - new_permissions:
+            user.user_permissions.remove(added)
+            logger.debug(f'granted {added} to {user}')
+
+        # broken because ATOMIC_TRANSACTIONS
+        for removed in new_permissions - old_permissions:
+            user.user_permissions.add(removed)
+            logger.debug(f'granted {removed} to {user}')
 
         if auth0_api_settings.AUTHORIZATION_EXTENSION:
             # this block causes atomic requests to fail if not wrapped in it's own transaction
