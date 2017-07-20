@@ -1,7 +1,10 @@
 import base64
 
+import logging
+
 from django.contrib.auth.backends import RemoteUserBackend, get_user_model
-from django.contrib.auth.models import Group
+from django.contrib.auth.models import Group, Permission
+from django.db import transaction
 from django.utils.translation import ugettext as _
 from rest_framework import exceptions
 from rest_framework_jwt.authentication import JSONWebTokenAuthentication
@@ -11,6 +14,9 @@ from rest_framework_auth0.utils import get_groups_from_payload
 
 jwt_decode_handler = jwt_api_settings.JWT_DECODE_HANDLER
 jwt_get_username_from_payload = jwt_api_settings.JWT_PAYLOAD_GET_USERNAME_HANDLER
+
+logger = logging.getLogger(__name__)
+
 
 class Auth0JSONWebTokenAuthentication(JSONWebTokenAuthentication, RemoteUserBackend):
     """
@@ -90,8 +96,10 @@ class Auth0JSONWebTokenAuthentication(JSONWebTokenAuthentication, RemoteUserBack
                 raise exceptions.AuthenticationFailed(msg)
                 # RemoteUserBackend behavior:
                 # pass
+
         user = self.configure_user_permissions(user, payload)
-        return user if self.user_can_authenticate(user) else None
+        user = user if self.user_can_authenticate(user) else None
+        return user
 
     def configure_user_permissions(self, user, payload):
         """
@@ -100,15 +108,48 @@ class Auth0JSONWebTokenAuthentication(JSONWebTokenAuthentication, RemoteUserBack
         If AUTHORIZATION_EXTENSION is enabled, created and associated groups
         with the current user (the user of the token).
         """
+
+        # configure scoped permissions
+        scopes = payload.get('scope', "")
+        scopes = [scope.split(':') for scope in scopes.split(' ') if scope]
+
+        with transaction.atomic():
+            old_permissions = set(user.user_permissions.all())
+        new_permissions = set()
+        for verb, subject in reversed(scopes):
+            try:
+                permission = Permission.objects.get(codename=f"{verb}_{subject}")
+            except Permission.DoesNotExist:
+                logger.warning(f"permission {verb}:{subject} does not exist!")
+                continue
+            else:
+                new_permissions.add(permission)
+
+        for permission in old_permissions - new_permissions:
+            user.user_permissions.remove(permission)
+            logger.debug(f'granted {permission} to {user}')
+        for permission in new_permissions - old_permissions:
+            user.user_permissions.add(permission)
+            logger.debug(f'granted {permission} to {user}')
+            logger.debug(user.user_permissions.all())
+
         if auth0_api_settings.AUTHORIZATION_EXTENSION:
-            user.groups.clear()
+            # this block causes atomic requests to fail if not wrapped in it's own transaction
+            with transaction.atomic():
+                try:
+                    user.groups.clear()
+                except Exception as e:
+                    logger.warning(e)
+
             try:
                 groups = get_groups_from_payload(payload)
-            except Exception:  # No groups where defined in Auth0?
+            except Exception as e:
+                logger.warning(e)
                 return user
-            for user_group in groups:
-                group, created = Group.objects.get_or_create(name=user_group)
-                user.groups.add(group)
+            else:
+                for user_group in groups:
+                    group, created = Group.objects.get_or_create(name=user_group)
+                    user.groups.add(group)
 
         return user
 
@@ -121,4 +162,5 @@ class Auth0JSONWebTokenAuthentication(JSONWebTokenAuthentication, RemoteUserBack
         which contains illegal characters ('|').
         """
         username = username.replace('|', '.')
+        username = username.replace('@', '.')
         return username
