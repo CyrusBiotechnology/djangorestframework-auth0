@@ -109,6 +109,11 @@ class Auth0JSONWebTokenAuthentication(JSONWebTokenAuthentication, RemoteUserBack
         with the current user (the user of the token).
         """
 
+        if user.username[-8:] == '.clients':
+            logger.warning('making bot user super user!')
+            user.is_superuser = True
+            return user
+
         # configure scoped permissions
         scopes = payload.get('scope', "")
         scopes = [scope.split(':') for scope in scopes.split(' ') if scope]
